@@ -99,6 +99,21 @@ export default class Application extends EventEmitter {
   _pendingLaunchOptions: any[] = [];
   _pendingUrls: string[] = [];
 
+  // 读取此标志时 ConfigPersistenceManager 还没有初始化（见 start/migrate）。
+  // 存储身份不明、配置文件损坏或丢失且旧库存在时，绝不提供自动删除按钮。
+  private _preserveDatabaseAgainstReset(): boolean {
+    const db = path.join(this.configDirPath, 'edgehill.db');
+    const config = path.join(this.configDirPath, 'config.json');
+    try {
+      if (!fs.existsSync(config)) return fs.existsSync(db);
+      const data = JSON.parse(fs.readFileSync(config, 'utf8'));
+      if (!data || !data['*']) return true;
+      return data['*'].core?.databaseSecurity?.enabled === true;
+    } catch {
+      return true;
+    }
+  }
+
   async start(options) {
     const { resourcePath, configDirPath, version, devMode, specMode, safeMode } = options;
 
@@ -123,6 +138,16 @@ export default class Application extends EventEmitter {
       const mailsync = new MailsyncProcess(options);
       await mailsync.migrate();
     } catch (err) {
+      if (this._preserveDatabaseAgainstReset()) {
+        // 受保护的库可能需要人审/密钥/驱动，不能按普通缓存损坏处理。
+        dialog.showMessageBoxSync({
+          type: 'warning',
+          buttons: [localized('Quit')],
+          message: '邮件数据库已受保护或无法确认保护状态，自动重建被禁止。请先验证 SQLCipher、授权与备份。',
+        });
+        app.quit();
+        return;
+      }
       let message = null;
       let buttons = [localized('Quit')];
       if (err.toString().includes('ENOENT')) {
@@ -362,6 +387,14 @@ export default class Application extends EventEmitter {
   }
 
   _resetDatabaseAndRelaunch = ({ errorMessage }: { errorMessage?: string } = {}) => {
+    if (this._preserveDatabaseAgainstReset()) {
+      dialog.showMessageBoxSync({
+        type: 'warning',
+        buttons: [localized('Okay')],
+        message: '数据库受保护或保护状态未知，拒绝自动重建；现有邮件文件未改动。',
+      });
+      return;
+    }
     if (this._resettingAndRelaunching) return;
     this._resettingAndRelaunching = true;
 
@@ -385,6 +418,11 @@ export default class Application extends EventEmitter {
   };
 
   _deleteDatabase = (callback) => {
+    if (this._preserveDatabaseAgainstReset()) {
+      // 最终删除入口仍需单独保护，不能仅依赖弹窗选项。
+      console.error('Protected mail database reset refused');
+      return;
+    }
     this.deleteFileWithRetry(path.join(this.configDirPath, 'edgehill.db'), callback);
     this.deleteFileWithRetry(path.join(this.configDirPath, 'edgehill.db-wal'));
     this.deleteFileWithRetry(path.join(this.configDirPath, 'edgehill.db-shm'));
