@@ -15,7 +15,7 @@ export function transformStore(header, cpp) {
   header = replaceCount(header, '    MailStore();',
     '    MailStore();\n    static void configureDatabaseKeyHex(const std::string & hex);', 1, 'store header');
   cpp = replaceCount(cpp, '#include <stdexcept>',
-    '#include <stdexcept>\n#include <fstream>\n#include <cctype>\n#include <cstring>', 1, 'store includes');
+    '#include <stdexcept>\n#include <fstream>\n#include <cctype>\n#include <cstring>\n#include <array>\n#include <algorithm>\n#include <sqlite3.h>', 1, 'store includes');
   const helper = [
     'namespace {',
     'std::string cipherKeyHex;',
@@ -33,7 +33,17 @@ export function transformStore(header, cpp) {
     '        }',
     '    }',
     '    SQLite::Database result(file, SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE);',
-    '    result.exec("PRAGMA key = \\"x\'" + cipherKeyHex + "\'\\";");',
+    '    std::array<unsigned char, 32> key{};',
+    '    auto nibble = [](unsigned char c) -> unsigned char {',
+    '        if (c >= 48 && c <= 57) return c - 48;',
+    '        if (c >= 65 && c <= 70) return c - 65 + 10;',
+    '        return c - 97 + 10;',
+    '    };',
+    '    for (size_t i = 0; i < key.size(); ++i)',
+    '        key[i] = (nibble(cipherKeyHex[2 * i]) << 4) | nibble(cipherKeyHex[2 * i + 1]);',
+    '    const int keyResult = sqlite3_key(result.getHandle(), key.data(), (int) key.size());',
+    '    std::fill(key.begin(), key.end(), 0);',
+    '    if (keyResult != SQLITE_OK) throw std::runtime_error("SQLCipher key setup failed");',
     '    SQLite::Statement version(result, "PRAGMA cipher_version");',
     '    if (!version.executeStep() || version.getColumn(0).getString().empty())',
     '        throw std::runtime_error("SQLCipher driver unavailable");',
