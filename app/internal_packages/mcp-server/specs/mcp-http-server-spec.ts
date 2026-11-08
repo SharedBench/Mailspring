@@ -89,10 +89,12 @@ describe('McpHttpServer per-client approval', function () {
       try {
         const { tools } = await client.listTools();
         expect(tools.map((t) => t.name)).toContain('list_accounts');
-        const { resourceTemplates } = await client.listResourceTemplates();
-        expect(resourceTemplates.map((t) => t.uriTemplate)).not.toContain(
-          'attachment://{messageId}/{fileId}'
-        );
+        // 只读 grant 不包含附件：不会触发文件系统读取。
+        const attachment = await client.callTool({
+          name: 'get_attachment',
+          arguments: { messageId: 'not-authorized', fileId: 'not-authorized' },
+        });
+        expect(attachment.isError).toBe(true);
       } finally {
         await client.close();
       }
