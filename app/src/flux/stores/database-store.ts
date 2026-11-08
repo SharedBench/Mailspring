@@ -198,7 +198,10 @@ class DatabaseStore extends MailspringStore {
   async open() {
     try {
       this._db = await openDatabase(this._databasePath);
-      if (!this._db) throw new Error('Database could not be opened');
+      // 普通模式保留原有错误恢复/状态通知；只有加密模式禁止重建和降级。
+      if (!this._db && databaseEncryptionRequested()) {
+        throw new Error('Protected database could not be opened');
+      }
       this._open = true;
       for (const w of this._waiting) w();
       this._waiting = [];
