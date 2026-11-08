@@ -76,3 +76,11 @@ flowchart TD
 - runner：`scripts/test-mcp-http-security.cjs`；显式指定 `CHUMEN_MCP_TEST_RUNTIME`（固定依赖目录）、`CHUMEN_MCP_TEST_OUTPUT`（任务临时目录）。依赖安装关闭 scripts，未安装或启动用户 Mailspring。
 - 初次隔离测试因 SDK 模块解析方式及已有可空 transport 类型检查失败，已修正解析与生产闭包的确定 transport 后通过；不把失败改成通过。
 - **BLOCKED**：核心数据库 SQLCipher 双端尚未完成，不能启用加密、迁移真实邮箱或称 issue #66 已解决。保持原 PR Draft。
+
+### 并行 SQLCipher 源码接入核对
+
+本轮 HTTP 补修提交 `5e2ffb7b` 后，已在本独立分支非强制合入原 PR #1 的并行提交 `d405226b0b49be4538f76788451b23b8269428fb`，保留其固定上游 C++ 源码变换、Electron 开发态密钥读取与失败不删库逻辑。上文 NOT_IMPLEMENTED 为当时检查点，当前已存在 SQLCipher 接入源码，不能继续概括为完全没有代码；但完整双端原生编译、启动早期授权、迁移和生产密钥协议仍 BLOCKED，不能启用真实邮箱加密。
+
+REAL：在 Mac 上运行 `node --test scripts/sqlcipher/prepare-sync-source.test.mjs`，3/3 通过；构建脚本语法及探针语法检查通过。它们只验证源码变换，不代表真实 SQLCipher C++／Electron 已互通。另修复探针无限保存原生输出和自动删除验收目录的问题：只计输出字节，1 MiB 上限、90 秒时限，异常后等待本次子进程关闭，保留测试 profile。用 `/usr/bin/false` 做真实本机失败路径检查，预期非零退出且目录保留；该程序是替身，不是 SQLCipher 成功验收。
+
+NOT_RUN：SQLCipher 成功读写、真实邮箱迁移、Electron 完整构建、Chumen 原生审批和正式安装。未合主、未启动用户 Mailspring，原 PR 保持 Draft。
