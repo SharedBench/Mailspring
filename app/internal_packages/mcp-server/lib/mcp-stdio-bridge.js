@@ -1,22 +1,7 @@
 /*
- * Stdio ↔ Streamable HTTP bridge between MCP clients that only speak stdio
- * (Claude Desktop) and Mailspring's MCP server.
- *
- * Claude Desktop runs this script with Mailspring's own Electron binary under
- * ELECTRON_RUN_AS_NODE=1, so the integration works on machines with no Node.js
- * installed. The script therefore depends on nothing but Node built-ins and is
- * plain CommonJS: Node executes it directly, and it is never loaded through
- * Mailspring's TypeScript compile hook.
- *
- * Usage: mcp-stdio-bridge.js --config-dir <Mailspring config directory>
- *
- * The port and bearer token are read from Mailspring's config.json on every
- * request, so regenerating the token or changing the port never leaves the
- * client with stale settings, and the token never has to be written into the
- * client's config file. When Mailspring restarts, its server forgets the HTTP
- * session; the bridge re-runs the initialize handshake and retries instead of
- * surfacing "Invalid or missing session" on every call until the client is
- * restarted.
+ * 历史 stdio 桥仍保留以解释旧配置，但从本轮开始无法通过共享 Bearer 进入邮件 MCP。
+ * 用户必须在 Mailspring 的 MCP 设置中逐客户端授权并配置单独令牌。
+ * 不提供自动继承 core.mcp.token 或向旧 CLI 配置文件泄露单独授权的回退。
  */
 const fs = require('fs');
 const http = require('http');
@@ -71,10 +56,11 @@ function readServerSettings(configDir) {
     throw new Error(`Could not read Mailspring's config.json in ${configDir}: ${err.message}`);
   }
   const mcp = (parsed['*'] && parsed['*'].core && parsed['*'].core.mcp) || {};
-  if (!mcp.enabled || !mcp.token) {
-    throw new Error(DISABLED_MESSAGE);
-  }
-  return { port: mcp.port || DEFAULT_PORT, token: mcp.token };
+  if (!mcp.enabled) throw new Error(DISABLED_MESSAGE);
+  // 不读取、不发送 config.json 里遗留的共享 bearer。
+  throw new Error(
+    '旧 Mailspring stdio 桥的共享令牌已禁用。请在 Mailspring MCP 页面逐客户端授权，并手动配置独立只读令牌。'
+  );
 }
 
 function writeToClient(message) {

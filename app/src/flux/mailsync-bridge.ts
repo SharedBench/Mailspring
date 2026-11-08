@@ -16,6 +16,7 @@ import { DatabaseChangeRecord } from './stores/database-change-record';
 import DatabaseObjectRegistry from '../registries/database-object-registry';
 import { MailsyncProcess, MailsyncProcessExit } from '../mailsync-process';
 import KeyManager from '../key-manager';
+import { databaseEncryptionRequested, databaseEncryptionKeyHex } from '../services/mail-database-security';
 import * as Actions from './actions';
 import * as Utils from './models/utils';
 import { Model } from 'mailspring-exports';
@@ -300,6 +301,10 @@ export default class MailsyncBridge {
   }
 
   async resetCacheForAccount(account: Account, { silent }: { silent?: boolean } = {}) {
+    if (databaseEncryptionRequested()) {
+      // 原版 reset 操作不理解带密钥的迁移及备份；禁止把加密数据库重建成明文。
+      throw new Error('SQLCipher 模式暂不允许重建邮件数据库，需完成安全迁移/恢复验收');
+    }
     // grab the existing client, if there is one
     const syncingClient = this._clients[account.id];
 
@@ -381,6 +386,18 @@ export default class MailsyncBridge {
     const client = new MailsyncProcess(this._getClientConfiguration());
     this._clients[account.id] = client; // set this synchornously so we never spawn two
 
+    if (databaseEncryptionRequested()) {
+      try {
+        const secret = await databaseEncryptionKeyHex();
+        if (!secret) throw new Error('Missing encrypted database key');
+        client.configureEncryptedDatabaseKey(secret);
+      } catch {
+        // 不启动普通 mailsync；不打印原始密钥或安全存储失败细节。
+        if (this._clients[account.id] === client) delete this._clients[account.id];
+        console.error('Protected mail database is not available; sync was not started.');
+        return;
+      }
+    }
     const fullAccountJSON = (await KeyManager.insertAccountSecrets(account, keys)).toJSON();
 
     if (force) {

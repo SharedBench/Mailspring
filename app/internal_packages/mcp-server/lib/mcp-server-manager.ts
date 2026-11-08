@@ -1,5 +1,6 @@
 import MailspringStore from 'mailspring-store';
 import { McpHttpServer } from './mcp-http-server';
+import { findAuthorizedMcpClient } from './mcp-client-authorization';
 
 class McpServerManagerStore extends MailspringStore {
   private _server: McpHttpServer = new McpHttpServer();
@@ -30,32 +31,12 @@ class McpServerManagerStore extends MailspringStore {
     return this._error;
   }
 
-  getToken(): string {
-    let token = AppEnv.config.get('core.mcp.token');
-    if (!token) {
-      token = crypto.randomUUID();
-      AppEnv.config.set('core.mcp.token', token);
-    }
-    return token;
-  }
-
-  regenerateToken() {
-    const token = crypto.randomUUID();
-    AppEnv.config.set('core.mcp.token', token);
-    // The server reads the token dynamically on each request (see
-    // McpHttpServer.start's getToken callback), so this does not require
-    // (and will not trigger) a server restart.
-  }
-
   private async _reconcileServerState() {
     const enabled = AppEnv.config.get('core.mcp.enabled') || false;
     const port = AppEnv.config.get('core.mcp.port') || 2587;
 
-    // Only `enabled` and `port` require the HTTP server to actually
-    // stop/start — accessLevel and enabledAccounts are read live on every
-    // tool call (see mcp-access-control.ts), and the token is looked up
-    // dynamically per-request, so changes to those must not interrupt any
-    // live client sessions.
+    // 配置发生变化会清理原会话；只在监听开关或端口变化时重绑 TCP。
+    // MCP 身份与权限始终按最新授权列表重新读取。
     const snapshot = { enabled, port };
     const changed =
       !this._lastSnapshot ||
@@ -64,6 +45,8 @@ class McpServerManagerStore extends MailspringStore {
     this._lastSnapshot = snapshot;
 
     if (!changed) {
+      // 包括客户端撤销、账号范围变化：终止先前创建的 MCP 会话。
+      await this._server.invalidateSessions();
       return;
     }
 
@@ -79,7 +62,9 @@ class McpServerManagerStore extends MailspringStore {
     // enabled or port changed — restart to (re)bind the listener.
     try {
       await this._server.stop();
-      await this._server.start(port, () => this.getToken());
+      await this._server.start(port, (token) =>
+        findAuthorizedMcpClient(token, AppEnv.config.get('core.mcp.approvedClients'))
+      );
       this._error = null;
     } catch (err) {
       const nodeErr = err as NodeJS.ErrnoException;

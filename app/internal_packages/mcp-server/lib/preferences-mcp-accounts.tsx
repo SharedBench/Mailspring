@@ -21,7 +21,7 @@ export default class PreferencesMcpAccounts extends React.Component<Props, State
 
   _isAccountEnabled(accountId: string): boolean {
     const { enabledAccounts } = this.props;
-    if (Object.keys(enabledAccounts).length === 0) return true;
+    if (Object.keys(enabledAccounts).length === 0) return false;
     return enabledAccounts[accountId]?.enabled ?? false;
   }
 
@@ -33,13 +33,7 @@ export default class PreferencesMcpAccounts extends React.Component<Props, State
     const current = { ...this.props.enabledAccounts };
     const wasEnabled = this._isAccountEnabled(accountId);
 
-    // If this is the first toggle and no accounts are configured, initialize all as enabled
-    if (Object.keys(current).length === 0) {
-      for (const a of AccountStore.accounts()) {
-        current[a.id] = { enabled: true };
-      }
-    }
-
+    // 新账号默认拒绝；只有用户明确勾选的邮箱可见。
     current[accountId] = { ...current[accountId], enabled: !wasEnabled };
     this.props.onChange(current);
   };
@@ -47,12 +41,8 @@ export default class PreferencesMcpAccounts extends React.Component<Props, State
   _toggleFolder = (accountId: string, folderId: string) => {
     const current = { ...this.props.enabledAccounts };
 
-    // Initialize if needed
-    if (Object.keys(current).length === 0) {
-      for (const a of AccountStore.accounts()) {
-        current[a.id] = { enabled: true };
-      }
-    }
+    // 未明确授权的账户不能通过编辑文件夹规则自动获得访问权。
+    if (!current[accountId]?.enabled) return;
 
     const accountConfig = { ...current[accountId] };
     const excluded = [...(accountConfig.excludedFolderIds || [])];

@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
   AccountStore,
@@ -295,7 +295,13 @@ function defineTool(
     withAudit(name, args, async () => {
       const err = checkAccessLevel(accessCategory);
       if (err) return errorResult(err);
-      return handler(args);
+      // 附件内容及本地路径不属于首批已授权的只读邮件能力。
+      if (name === 'get_attachment') {
+        return errorResult('Attachment access requires a separate approval and is disabled');
+      }
+      const result = await handler(args);
+      const revoked = checkAccessLevel(accessCategory);
+      return revoked ? errorResult(revoked) : result;
     })
   );
 }
@@ -306,59 +312,9 @@ function defineTool(
 // metadata) and a client opts in to the bytes via resources/read, where the
 // spec carries them as a blob. The same account/folder authorization as
 // get_attachment applies, and reads land in the audit log.
-export function registerResources(server: McpServer) {
-  server.registerResource(
-    'attachment',
-    new ResourceTemplate(`${ATTACHMENT_URI_SCHEME}://{messageId}/{fileId}`, { list: undefined }),
-    {
-      title: 'Email attachment',
-      description: 'Raw bytes of an email attachment. Discover URIs via the get_attachment tool.',
-    },
-    async (uri, variables) => {
-      const start = Date.now();
-      const audit = (resultSummary: string) =>
-        addAuditEntry({
-          source: 'mcp',
-          toolName: 'resources/read',
-          params: uri.href.slice(0, 200),
-          resultSummary,
-          durationMs: Date.now() - start,
-        });
-
-      try {
-        // Variables come from the SDK's template match on the raw URI, so
-        // they preserve the ids' case (unlike uri.host, which URL lowercases).
-        const messageId = decodeURIComponent(String(variables.messageId));
-        const fileId = decodeURIComponent(String(variables.fileId));
-
-        const message = await DatabaseStore.find<Message>(Message, messageId);
-        if (!(await isMessageVisible(message))) {
-          throw new Error(`Message '${messageId}' not found`);
-        }
-        const file = (message.files || []).find((f) => f.id === fileId);
-        if (!file) {
-          throw new Error(`Message '${messageId}' has no attachment with id '${fileId}'`);
-        }
-        const filePath = await attachmentPathOnDisk(file);
-        if (!filePath) {
-          throw new Error(
-            `Attachment '${file.displayName()}' has not been downloaded — call the get_attachment tool first.`
-          );
-        }
-
-        const buffer = await fs.promises.readFile(filePath);
-        audit('ok');
-        return {
-          contents: [
-            { uri: uri.href, mimeType: mimeTypeForFile(file), blob: buffer.toString('base64') },
-          ],
-        };
-      } catch (err) {
-        audit(`error: ${(err as Error).message}`.slice(0, 100));
-        throw err;
-      }
-    }
-  );
+// 最小权限版本不向 MCP 注册附件 resources/read，避免只读邮件令牌读取磁盘文件。
+export function registerResources(_server: McpServer) {
+  // 附件能力需要单独的人审与结果限制后再启用。
 }
 
 export function registerTools(server: McpServer) {
