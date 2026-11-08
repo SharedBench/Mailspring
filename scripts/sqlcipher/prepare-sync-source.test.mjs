@@ -13,6 +13,8 @@ test('只修改预期固定版本的 MailStore 构造入口，密钥先于事务
   assert.match(result.header, /configureDatabaseKeyHex/);
   assert.match(result.cpp, /_db\(openCipherDatabase\(\)\)/);
   assert.match(result.cpp, /sqlite3_key\(result.getHandle\(\)/);
+  assert.match(result.cpp, /std::string rawKey =/);
+  assert.match(result.cpp, /rawKey\.data\(\)/);
   assert.match(result.cpp, /PRAGMA cipher_version/);
   assert.match(result.cpp, /Plaintext mailbox requires explicit migration/);
   assert.ok(result.cpp.indexOf('sqlite3_key(result.getHandle()') <
