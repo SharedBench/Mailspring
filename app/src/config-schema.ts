@@ -4,6 +4,14 @@ export default {
   core: {
     type: 'object',
     properties: {
+      databaseSecurity: {
+        type: 'object',
+        properties: {
+          // 不由设置页面自动启用；没有原生审批/密钥时一律拒绝，保留原始 DB。
+          enabled: { type: 'boolean', default: false },
+          wrappedKey: { type: 'string', default: '' },
+        },
+      },
       intl: {
         type: 'object',
         properties: {
