@@ -12,10 +12,10 @@ test('只修改预期固定版本的 MailStore 构造入口，密钥先于事务
   const result = transformStore(header, cpp);
   assert.match(result.header, /configureDatabaseKeyHex/);
   assert.match(result.cpp, /_db\(openCipherDatabase\(\)\)/);
-  assert.match(result.cpp, /PRAGMA key/);
+  assert.match(result.cpp, /sqlite3_key\(result.getHandle\(\)/);
   assert.match(result.cpp, /PRAGMA cipher_version/);
   assert.match(result.cpp, /Plaintext mailbox requires explicit migration/);
-  assert.ok(result.cpp.indexOf('result.exec("PRAGMA key') <
+  assert.ok(result.cpp.indexOf('sqlite3_key(result.getHandle()') <
     result.cpp.indexOf('SELECT count(*) FROM sqlite_master'));
   assert.throws(() => transformStore(header, result.cpp), /上游源码已改变/);
   assert.equal(PINNED_SYNC, '8681eae1d217d993e4d4dc7de17ae8b91fc3da49');
