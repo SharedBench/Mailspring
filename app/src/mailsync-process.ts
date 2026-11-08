@@ -147,6 +147,8 @@ export class MailsyncProcess extends EventEmitter {
   resourcePath: string;
   configDirPath: string;
   binaryPath: string;
+  private encryptedProfile: boolean;
+  private databaseKeyHex: string | null = null;
 
   constructor({ configDirPath, resourcePath, verbose }) {
     super();
@@ -154,6 +156,27 @@ export class MailsyncProcess extends EventEmitter {
     this.resourcePath = resourcePath;
     this.configDirPath = configDirPath;
     this.binaryPath = path.join(resourcePath, 'mailsync').replace('app.asar', 'app.asar.unpacked');
+    // 主进程迁移任务同样会走这里；避免仅在 Renderer 才知道加密状态。
+    this.encryptedProfile = false;
+    try {
+      const stored = JSON.parse(fs.readFileSync(path.join(configDirPath, 'config.json'), 'utf8'));
+      this.encryptedProfile = stored?.['*']?.core?.databaseSecurity?.enabled === true;
+    } catch {
+      // 配置本身的解析与错误弹窗仍由原配置 owner 负责。
+    }
+    if (typeof AppEnv !== 'undefined' && AppEnv.config) {
+      this.encryptedProfile =
+        this.encryptedProfile || AppEnv.config.get('core.databaseSecurity.enabled') === true;
+    }
+  }
+
+  configureEncryptedDatabaseKey(keyHex: string) {
+    if (!this.encryptedProfile || !/^[0-9a-f]{64}$/.test(keyHex)) {
+      throw new Error('SQLCipher 密钥或受控 profile 无效');
+    }
+    this.databaseKeyHex = keyHex;
+    this.binaryPath = path.join(this.resourcePath, 'mailsync-sqlcipher')
+      .replace('app.asar', 'app.asar.unpacked');
   }
 
   _showStatusWindow(mode) {
@@ -205,6 +228,10 @@ export class MailsyncProcess extends EventEmitter {
   }
 
   _spawnProcess(mode) {
+    // 已声明加密模式的 profile 禁止在普通 mailsync 二进制下启动。
+    if (this.encryptedProfile && !this.databaseKeyHex) {
+      throw new Error('SQLCipher key unavailable; plain sync engine refused');
+    }
     // Build on a null-prototype object so the spawned engine inherits only
     // genuine environment variables, not properties a prototype-pollution bug
     // elsewhere in the process could have added to Object.prototype. See
@@ -236,6 +263,10 @@ export class MailsyncProcess extends EventEmitter {
     if (this._proc.stdin) {
       this._proc.stdin.setDefaultEncoding('utf-8');
       (this._proc.stdin as any).highWaterMark = 1024 * 1024;
+      if (this.encryptedProfile) {
+        // 独立密钥帧必须先于后续账号 JSON 到达 C++；只传 stdin，不传 argv/env。
+        this._proc.stdin.write('MCPDB1:' + this.databaseKeyHex + '\n', 'utf-8');
+      }
     }
 
     // stdout may not be present if an error occurred. Error handler hasn't been
