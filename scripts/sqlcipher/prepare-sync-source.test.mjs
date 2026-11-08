@@ -39,8 +39,8 @@ test('macOS 构建移除普通 sqlite3.c 编译并链接 SQLCipher 两套配置'
     '\t\t\t\t436489901EF2F94F007816EC /* sqlite3.c in Sources */,',
     '"${PROJECT_DIR}/Vendor/SQLiteCpp/sqlite3",',
     '"${PROJECT_DIR}/Vendor/SQLiteCpp/sqlite3",',
-    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t"$(inherited)",',
-    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t"$(inherited)",',
+    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t\t"$(inherited)",',
+    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t\t"$(inherited)",',
     'OTHER_LDFLAGS = (',
     'OTHER_LDFLAGS = (',
   ].join('\n') + '\n';
