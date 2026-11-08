@@ -1,300 +1,145 @@
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import React from 'react';
+import { clipboard } from 'electron';
 import { localized } from 'mailspring-exports';
-import { Switch, RetinaImg, CopyButton } from 'mailspring-component-kit';
+import { Switch } from 'mailspring-component-kit';
 import McpServerManager from './mcp-server-manager';
 import PreferencesMcpAccounts from './preferences-mcp-accounts';
 import PreferencesMcpAudit from './preferences-mcp-audit';
-import { writeMailspringClaudeDesktopEntry } from './claude-desktop-config';
+import {
+  approvedMcpClients,
+  issueMcpClient,
+  McpClientGrant,
+} from './mcp-client-authorization';
 
-const execFileAsync = promisify(execFile);
-const CLAUDE_CODE_MCP_NAME = 'mailspring-mcp';
+type AccountSettings = {
+  [accountId: string]: { enabled: boolean; excludedFolderIds?: string[] };
+};
 
 interface State {
   enabled: boolean;
   port: number;
-  accessLevel: string;
-  token: string;
-  enabledAccounts: { [accountId: string]: { enabled: boolean; excludedFolderIds?: string[] } };
+  enabledAccounts: AccountSettings;
+  approvedClients: McpClientGrant[];
   running: boolean;
   error: string | null;
-  claudeStatus: string | null;
-  codexStatus: string | null;
-  claudeCodeStatus: string | null;
-  // Set true once the user has successfully added Mailspring to any AI tool;
-  // reveals the "Try It!" example prompt beneath the Quick Setup buttons.
-  tryItVisible: boolean;
+  clientName: string;
+  duration: '60' | '1440' | 'permanent';
+  notice: string;
 }
 
 export default class PreferencesMcp extends React.Component<Record<string, never>, State> {
-  _unsub: (() => void) | null = null;
-  // Debounce timer for committing the port input to config — see
-  // _onPortChange for why this is timer-based rather than blur-based.
-  _portChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  private _unsubscribe: (() => void) | null = null;
+  private _portChangeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(props: Record<string, never>) {
     super(props);
-    // tryItVisible is UI-only and must persist across the manager-driven
-    // setState(this._getState()) updates, so it lives outside _getState() and
-    // is seeded here.
-    this.state = { ...this._getState(), tryItVisible: false };
+    this.state = {
+      ...this._snapshot(),
+      clientName: '',
+      duration: '60',
+      notice: '',
+    };
   }
 
   componentDidMount() {
-    this._unsub = McpServerManager.listen(() => {
-      this.setState(this._getState());
+    this._unsubscribe = McpServerManager.listen(() => {
+      this.setState(this._snapshot());
     });
   }
 
   componentWillUnmount() {
-    this._unsub?.();
-    if (this._portChangeTimer) {
-      clearTimeout(this._portChangeTimer);
-      this._portChangeTimer = null;
-    }
+    this._unsubscribe?.();
+    if (this._portChangeTimer) clearTimeout(this._portChangeTimer);
   }
 
-  _getState(): Omit<State, 'tryItVisible'> {
+  private _snapshot() {
     return {
       enabled: AppEnv.config.get('core.mcp.enabled') || false,
       port: AppEnv.config.get('core.mcp.port') || 2587,
-      accessLevel: AppEnv.config.get('core.mcp.accessLevel') || 'read-only',
-      token: McpServerManager.getToken(),
       enabledAccounts: AppEnv.config.get('core.mcp.enabledAccounts') || {},
+      approvedClients: approvedMcpClients(AppEnv.config.get('core.mcp.approvedClients')),
       running: McpServerManager.isRunning(),
       error: McpServerManager.getError(),
-      claudeStatus: null,
-      codexStatus: null,
-      claudeCodeStatus: null,
     };
   }
 
-  _tryItPrompt() {
-    return localized(
-      'Read the threads in my inbox using Mailspring - what should I prioritize? Draft a reply to the most important message.'
-    );
-  }
-
-  // Renders one Quick Setup button. Short status messages ("Adding…",
-  // "Added!") display inside the fixed-width button in place of its label;
-  // long error messages are surfaced separately below the button row.
-  _renderQuickSetupButton(label: string, status: string | null, onClick: () => void) {
-    const isError = !!status && status.startsWith('Error');
-    return (
-      <button className="btn mcp-quick-setup-btn" onClick={onClick}>
-        {status && !isError ? status : label}
-      </button>
-    );
-  }
-
-  _onToggleEnabled = () => {
+  private _setEnabled = () => {
     AppEnv.config.set('core.mcp.enabled', !this.state.enabled);
-    this.setState(this._getState());
+    this.setState(this._snapshot());
   };
 
-  _onPortChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const port = parseInt(e.target.value, 10);
-    if (port > 0 && port < 65536) {
-      // Update local state immediately so the input stays responsive, but
-      // debounce the actual config write (~500ms after the user stops
-      // typing/spinning the input). This field is a number input, which is
-      // often adjusted via the spinner arrows rather than typed, so a
-      // timer-based debounce is more reliable here than commit-on-blur.
-      // Writing to config on every keystroke would otherwise trigger a
-      // full MCP server restart per keystroke.
-      this.setState({ port });
-      if (this._portChangeTimer) clearTimeout(this._portChangeTimer);
-      this._portChangeTimer = setTimeout(() => {
-        this._portChangeTimer = null;
-        AppEnv.config.set('core.mcp.port', port);
-      }, 500);
-    }
-  };
-
-  _onAccessLevelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    AppEnv.config.set('core.mcp.accessLevel', e.target.value);
-    this.setState({ accessLevel: e.target.value });
-  };
-
-  _onRegenerateToken = () => {
-    McpServerManager.regenerateToken();
-    this.setState(this._getState());
-  };
-
-  _onAccountsChange = (enabledAccounts: State['enabledAccounts']) => {
+  private _setAccounts = (enabledAccounts: AccountSettings) => {
     AppEnv.config.set('core.mcp.enabledAccounts', enabledAccounts);
     this.setState({ enabledAccounts });
   };
 
-  _onAddToClaudeDesktop = () => {
+  private _setPort = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const port = Number(event.target.value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+    this.setState({ port });
+    if (this._portChangeTimer) clearTimeout(this._portChangeTimer);
+    this._portChangeTimer = setTimeout(() => {
+      AppEnv.config.set('core.mcp.port', port);
+    }, 500);
+  };
+
+  private _issueClient = () => {
+    const accountIds = Object.keys(this.state.enabledAccounts).filter(
+      (id) => this.state.enabledAccounts[id]?.enabled
+    );
+    if (!accountIds.length) {
+      this.setState({ notice: '请先明确勾选至少一个允许访问的邮箱，默认不授权任何邮箱。' });
+      return;
+    }
+    if (this.state.approvedClients.length >= 32) {
+      this.setState({ notice: '客户端授权已达上限，请先撤销不再使用的授权。' });
+      return;
+    }
     try {
-      writeMailspringClaudeDesktopEntry();
-      this.setState({ claudeStatus: localized('Added!'), tryItVisible: true });
-      setTimeout(() => this.setState({ claudeStatus: null }), 3000);
-    } catch (err) {
-      this.setState({ claudeStatus: `Error: ${(err as Error).message}` });
-      setTimeout(() => this.setState({ claudeStatus: null }), 5000);
+      const durationMinutes = this.state.duration === 'permanent' ? null : Number(this.state.duration);
+      const { grant, token } = issueMcpClient(this.state.clientName, accountIds, durationMinutes);
+      // 不保存原始令牌。用户明确点击“创建并复制”时才写入一次剪贴板。
+      clipboard.writeText(token);
+      AppEnv.config.set('core.mcp.approvedClients', [...this.state.approvedClients, grant]);
+      this.setState({
+        approvedClients: [...this.state.approvedClients, grant],
+        clientName: '',
+        notice:
+          '只读访问令牌已复制到剪贴板（仅此一次）。请手动配置到该客户端；不要分享或写进仓库，配置后清空剪贴板。',
+      });
+    } catch (error) {
+      this.setState({ notice: (error as Error).message || '创建授权失败' });
     }
   };
 
-  _onAddToChatGPT = () => {
-    try {
-      const configDir =
-        process.platform === 'win32'
-          ? path.join(process.env.USERPROFILE || os.homedir(), '.codex')
-          : path.join(os.homedir(), '.codex');
-      const configPath = path.join(configDir, 'config.toml');
-
-      let content = '';
-      try {
-        content = fs.readFileSync(configPath, 'utf8');
-      } catch {
-        // File doesn't exist — start fresh
-      }
-
-      const block = [
-        `[mcp_servers.mailspring]`,
-        `url = "http://127.0.0.1:${this.state.port}/mcp"`,
-        `http_headers = { "Authorization" = "Bearer ${this.state.token}" }`,
-      ].join('\n');
-
-      // Replace existing mailspring block or append
-      // eslint-disable-next-line no-useless-escape
-      const sectionRe = /\[mcp_servers\.mailspring\][^\[]*/s;
-      if (sectionRe.test(content)) {
-        content = content.replace(sectionRe, block + '\n\n');
-      } else {
-        content = content.trimEnd() + (content.trim() ? '\n\n' : '') + block + '\n';
-      }
-
-      fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(configPath, content, 'utf8');
-
-      this.setState({ codexStatus: localized('Added!'), tryItVisible: true });
-      setTimeout(() => this.setState({ codexStatus: null }), 3000);
-    } catch (err) {
-      this.setState({ codexStatus: `Error: ${(err as Error).message}` });
-      setTimeout(() => this.setState({ codexStatus: null }), 5000);
-    }
-  };
-
-  // Resolves the `claude` CLI binary's absolute path, if installed. GUI apps
-  // on macOS/Linux inherit a minimal PATH that often excludes nvm/Homebrew
-  // install locations, so we resolve it through the user's login shell
-  // (which sources their shell profile) rather than trusting our own PATH.
-  async _findClaudeBinary(): Promise<string | null> {
-    try {
-      if (process.platform === 'win32') {
-        const { stdout } = await execFileAsync('where', ['claude']);
-        return stdout.split(/\r?\n/)[0].trim() || null;
-      }
-      const shell = process.env.SHELL || '/bin/zsh';
-      const { stdout } = await execFileAsync(shell, ['-lic', 'command -v claude']);
-      // A login/interactive shell sources the user's profile, which can print
-      // banners to stdout around our command's output (e.g. macOS Terminal's
-      // "Restored session: <date>" line). So don't trust the whole blob —
-      // scan the lines for the last one that's an actual absolute path to an
-      // existing file, which is the `command -v claude` result.
-      const lines = stdout
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].startsWith('/') && fs.existsSync(lines[i])) return lines[i];
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  _onAddToClaudeCode = async () => {
-    this.setState({ claudeCodeStatus: localized('Adding…') });
-    try {
-      const claudeBin = await this._findClaudeBinary();
-      if (!claudeBin) {
-        this.setState({
-          claudeCodeStatus:
-            'Error: Claude Code CLI not found on your PATH. Install it, then try again.',
-        });
-        setTimeout(() => this.setState({ claudeCodeStatus: null }), 6000);
-        return;
-      }
-
-      const url = `http://127.0.0.1:${this.state.port}/mcp`;
-      const header = `Authorization: Bearer ${this.state.token}`;
-
-      // `claude mcp add` doesn't overwrite an existing entry of the same
-      // name, so remove any prior registration first (ignoring errors if
-      // none exists) — this keeps the button safe to re-run after the port
-      // or token changes.
-      await execFileAsync(claudeBin, [
-        'mcp',
-        'remove',
-        CLAUDE_CODE_MCP_NAME,
-        '--scope',
-        'user',
-      ]).catch(() => {});
-
-      await execFileAsync(claudeBin, [
-        'mcp',
-        'add',
-        CLAUDE_CODE_MCP_NAME,
-        '--scope',
-        'user',
-        '--transport',
-        'http',
-        url,
-        '--header',
-        header,
-      ]);
-
-      this.setState({ claudeCodeStatus: localized('Added!'), tryItVisible: true });
-      setTimeout(() => this.setState({ claudeCodeStatus: null }), 3000);
-    } catch (err) {
-      this.setState({ claudeCodeStatus: `Error: ${(err as Error).message}` });
-      setTimeout(() => this.setState({ claudeCodeStatus: null }), 5000);
-    }
+  private _revokeClient = (id: string) => {
+    const next = this.state.approvedClients.filter((client) => client.id !== id);
+    AppEnv.config.set('core.mcp.approvedClients', next);
+    this.setState({ approvedClients: next, notice: '授权已撤销；该客户端原有令牌与会话立即失效。' });
   };
 
   render() {
     const {
       enabled,
       port,
-      accessLevel,
-      token,
+      enabledAccounts,
+      approvedClients,
       running,
       error,
-      enabledAccounts,
-      claudeStatus,
-      codexStatus,
-      claudeCodeStatus,
-      tryItVisible,
+      clientName,
+      duration,
+      notice,
     } = this.state;
-
-    const setupError = [claudeStatus, codexStatus, claudeCodeStatus].find(
-      (s) => s && s.startsWith('Error')
-    );
 
     return (
       <div className="container-mcp">
         <section>
           <h6>{localized('MCP Server')}</h6>
           <p className="mcp-description">
-            {localized(
-              'The MCP server lets AI assistants (like Claude Desktop) read and interact with your email.'
-            )}
+            邮件 MCP 默认没有授权。启用服务并不授予读取权；每个客户端必须单独创建授权并明确选择邮箱。
           </p>
           <div className="mcp-toggle-row">
-            <Switch
-              checked={enabled}
-              onChange={this._onToggleEnabled}
-              label={localized('Enable MCP Server')}
-            />
+            <Switch checked={enabled} onChange={this._setEnabled} label={localized('Enable MCP Server')} />
             <span className="mcp-toggle-label">{localized('Enable MCP Server')}</span>
             {enabled && (
               <span className={`mcp-status ${running ? 'running' : 'stopped'}`}>
@@ -305,115 +150,92 @@ export default class PreferencesMcp extends React.Component<Record<string, never
           {error && <div className="mcp-error">{error}</div>}
         </section>
 
-        {enabled && (
-          <>
-            <div className="mcp-columns">
-              <div className="mcp-column">
-                <section>
-                  <h6>{localized('Quick Setup')}</h6>
-                  <p className="mcp-description">
-                    {localized(
-                      "Add Mailspring to your AI tools with one click. This writes the connection details to each tool's config file."
-                    )}
-                  </p>
-                  <div className="mcp-quick-setup">
-                    {this._renderQuickSetupButton(
-                      localized('Add to Claude Desktop'),
-                      claudeStatus,
-                      this._onAddToClaudeDesktop
-                    )}
-                    {this._renderQuickSetupButton(
-                      localized('Add to ChatGPT Desktop'),
-                      codexStatus,
-                      this._onAddToChatGPT
-                    )}
-                    {this._renderQuickSetupButton(
-                      localized('Add to Claude Code'),
-                      claudeCodeStatus,
-                      this._onAddToClaudeCode
-                    )}
-                  </div>
-                  {setupError && <div className="mcp-error">{setupError}</div>}
-                  {tryItVisible && (
-                    <div className="mcp-try-it">
-                      <h6>{localized('Try It!')}</h6>
-                      <p className="mcp-description">
-                        {localized(
-                          'Note: Restart Claude / ChatGPT and start a new chat, existing chats may not see the new connector.'
-                        )}
-                      </p>
+        <section>
+          <h6>连接与授权</h6>
+          <p className="mcp-description">
+            旧的通用 Bearer Token 和 Claude/Codex 一键接入已禁用。请为每个 Agent 创建独立只读授权；
+            令牌仅在创建时复制一次，配置中只保留哈希，不自动授予附件、发送、删除和写入能力。
+            当前是 Mailspring 本机人工授权，Chumen 原生审批与进程身份认证需另行接入。
+          </p>
+          <div className="mcp-field-row">
+            <label>{localized('Port')}</label>
+            <input type="number" value={port} min={1} max={65535} onChange={this._setPort} className="mcp-port-input" />
+          </div>
+          <div className="mcp-field-row">
+            <label>{localized('Endpoint')}</label>
+            <code className="mcp-endpoint">http://127.0.0.1:{port}/mcp</code>
+          </div>
+        </section>
 
-                      <div className="mcp-try-it-prompt">
-                        <code>{this._tryItPrompt()}</code>
-                        <CopyButton text={() => this._tryItPrompt()} />
-                      </div>
-                    </div>
-                  )}
-                </section>
-              </div>
+        <section>
+          <h6>允许访问的邮箱</h6>
+          <p className="mcp-description">
+            所有邮箱默认关闭。先勾选允许访问的邮箱，然后为指定 Agent 签发只能访问这些邮箱的独立令牌。
+          </p>
+          <PreferencesMcpAccounts enabledAccounts={enabledAccounts} onChange={this._setAccounts} />
+        </section>
 
-              <div className="mcp-column">
-                <section>
-                  <h6>{localized('Connection')}</h6>
-                  <div className="mcp-field-row">
-                    <label>{localized('Port')}</label>
-                    <input
-                      type="number"
-                      value={port}
-                      onChange={this._onPortChange}
-                      min={1}
-                      max={65535}
-                      className="mcp-port-input"
-                    />
+        <section>
+          <h6>独立客户端授权（仅只读）</h6>
+          <div className="mcp-field-row">
+            <label>客户端名称</label>
+            <input
+              type="text"
+              value={clientName}
+              maxLength={100}
+              placeholder="例如：我的 Codex"
+              onChange={(event) => this.setState({ clientName: event.target.value })}
+            />
+          </div>
+          <div className="mcp-field-row">
+            <label>授权期限</label>
+            <select
+              value={duration}
+              onChange={(event) =>
+                this.setState({ duration: event.target.value as State['duration'] })
+              }
+            >
+              <option value="60">1 小时</option>
+              <option value="1440">1 天</option>
+              <option value="permanent">永久（随时可撤销）</option>
+            </select>
+          </div>
+          <button className="btn" onClick={this._issueClient}>
+            创建并复制独立只读令牌
+          </button>
+          {notice && <p className="mcp-description" role="status">{notice}</p>}
+          <p className="mcp-description">
+            HTTP 客户端需要设置 Authorization: Bearer &lt;刚刚复制的令牌&gt;。
+            此令牌代表持有者身份，不应交给其他 Agent；本机 HTTP 尚未升级到加密传输。
+          </p>
+
+          {approvedClients.length === 0 ? (
+            <p className="mcp-description">当前没有获授权的客户端，所有 MCP 请求均被拒绝。</p>
+          ) : (
+            <div className="mcp-accounts-list">
+              {approvedClients.map((client) => (
+                <div className="mcp-account-item" key={client.id}>
+                  <div className="mcp-account-header">
+                    <span className="mcp-account-name">{client.name}</span>
+                    <span className="mcp-account-email">
+                      只读 · {client.accountIds.length} 个邮箱 ·{' '}
+                      {client.expiresAt === null
+                        ? '永久'
+                        : new Date(client.expiresAt).toLocaleString()}
+                    </span>
+                    <button className="btn btn-small" onClick={() => this._revokeClient(client.id)}>
+                      撤销
+                    </button>
                   </div>
-                  <div className="mcp-field-row">
-                    <label>{localized('Access Level')}</label>
-                    <select value={accessLevel} onChange={this._onAccessLevelChange}>
-                      <option value="read-only">{localized('Read Only')}</option>
-                      <option value="read-write">{localized('Read & Write')}</option>
-                      <option value="read-write-send">{localized('Read, Write & Send')}</option>
-                    </select>
-                  </div>
-                  <div className="mcp-field-row">
-                    <label>{localized('Endpoint')}</label>
-                    <code className="mcp-endpoint">http://127.0.0.1:{port}/mcp</code>
-                  </div>
-                  <div className="mcp-field-row">
-                    <label>{localized('Bearer Token')}</label>
-                    <div className="mcp-token-row">
-                      <code className="mcp-token">{token}</code>
-                      <CopyButton text={token} />
-                      <button
-                        className="btn btn-small btn-icon"
-                        onClick={this._onRegenerateToken}
-                        title={localized('Regenerate token')}
-                      >
-                        <RetinaImg name="ic-refresh.png" mode={RetinaImg.Mode.ContentIsMask} />
-                      </button>
-                    </div>
-                  </div>
-                </section>
-              </div>
+                </div>
+              ))}
             </div>
+          )}
+        </section>
 
-            <section>
-              <h6 style={{ marginTop: 0 }}>{localized('Account Access')}</h6>
-              <p className="mcp-description">
-                {localized(
-                  'Choose which accounts and folders the MCP server can access. All accounts are enabled by default.'
-                )}
-              </p>
-              <PreferencesMcpAccounts
-                enabledAccounts={enabledAccounts}
-                onChange={this._onAccountsChange}
-              />
-            </section>
-
-            <section>
-              <PreferencesMcpAudit />
-            </section>
-          </>
-        )}
+        <section>
+          <PreferencesMcpAudit />
+        </section>
       </div>
     );
   }
