@@ -98,8 +98,8 @@ export function transformXcode(project, prefix) {
     '"${PROJECT_DIR}/Vendor/SQLiteCpp/sqlite3",',
     '"' + prefix + '/include/sqlcipher",', 2, 'SQLCipher headers');
   project = replaceCount(project,
-    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t"$(inherited)",',
-    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t"$(inherited)",\n\t\t\t\t"' + prefix + '/lib",',
+    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t\t"$(inherited)",',
+    'LIBRARY_SEARCH_PATHS = (\n\t\t\t\t\t"$(inherited)",\n\t\t\t\t\t"' + prefix + '/lib",',
     2, 'SQLCipher library search');
   project = replaceCount(project,
     'OTHER_LDFLAGS = (\n',
