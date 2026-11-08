@@ -1,9 +1,14 @@
 /* eslint global-require: 0 */
 import path from 'path';
+import fs from 'fs';
 import createDebug from 'debug';
 import childProcess, { ChildProcess } from 'child_process';
 import { LRUCache } from 'lru-cache';
 import Sqlite3 from 'better-sqlite3';
+import {
+  databaseEncryptionRequested,
+  databaseEncryptionKeyHex,
+} from '../../services/mail-database-security';
 
 import { ExponentialBackoffScheduler } from '../../backoff-schedulers';
 import { Model } from '../models/model';
@@ -49,8 +54,39 @@ function handleUnrecoverableDatabaseError(
 }
 
 async function openDatabase(dbPath: string) {
+  const encrypted = databaseEncryptionRequested();
   try {
+    // 错密/现存明文库不得触发原版的 reset-database 指令（会删除邮件缓存）。
+    const keyHex = encrypted ? await databaseEncryptionKeyHex() : null;
+    if (encrypted && !keyHex) throw new Error('Missing encrypted database key');
+    if (encrypted && fs.existsSync(dbPath)) {
+      const fd = fs.openSync(dbPath, 'r');
+      try {
+        const header = Buffer.alloc(16);
+        const read = fs.readSync(fd, header, 0, 16, 0);
+        if (read === 16 && header.equals(Buffer.from('SQLite format 3\0'))) {
+          throw new Error('Plaintext database requires explicit encrypted migration');
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
     const db = new Sqlite3(dbPath, { readonly: true, timeout: 10000 }) as Sqlite3.Database;
+    if (encrypted) {
+      // 必须是显式用 SQLCipher 重新编译的 better-sqlite3；普通 SQLite 返回空版本。
+      db.pragma('key = "x\'' + keyHex + '\'"');
+      const version = db.pragma('cipher_version', { simple: true });
+      if (!version) {
+        db.close();
+        throw new Error('SQLCipher native binding is unavailable');
+      }
+      try {
+        db.prepare('SELECT count(*) FROM sqlite_master').get();
+      } catch {
+        db.close();
+        throw new Error('Encrypted database key could not open schema');
+      }
+    }
 
     // https://www.sqlite.org/wal.html
     // WAL provides more concurrency as readers do not block writers and a writer
@@ -76,6 +112,10 @@ async function openDatabase(dbPath: string) {
     db.pragma(`mmap_size = 2147418112`);
     return db;
   } catch (err) {
+    if (encrypted) {
+      // 原始异常可能带有敏感 SQL 或路径；不进入自动重建/删除流程。
+      throw new Error('Encrypted database unavailable: refusing plaintext fallback or reset');
+    }
     handleUnrecoverableDatabaseError(err);
     return null;
   }
@@ -143,6 +183,7 @@ class DatabaseStore extends MailspringStore {
   _preparedStatementCache = new LRUCache<string, Sqlite3.Statement<any[]>>({ max: 500 });
   _databasePath = databasePath(AppEnv.getConfigDirPath(), AppEnv.inSpecMode());
   _db?: Sqlite3.Database;
+  _openFailure?: Error;
 
   constructor() {
     super();
@@ -155,13 +196,18 @@ class DatabaseStore extends MailspringStore {
   }
 
   async open() {
-    this._db = await openDatabase(this._databasePath);
-    this._open = true;
-    for (const w of this._waiting) {
-      w();
+    try {
+      this._db = await openDatabase(this._databasePath);
+      if (!this._db) throw new Error('Database could not be opened');
+      this._open = true;
+      for (const w of this._waiting) w();
+      this._waiting = [];
+      this._emitter.emit('ready');
+    } catch {
+      this._openFailure = new Error('邮件数据库不可用，未执行自动重建或明文回退');
+      for (const w of this._waiting) w();
+      this._waiting = [];
     }
-    this._waiting = [];
-    this._emitter.emit('ready');
   }
 
   _prettyConsoleLog(qa: string) {
@@ -225,6 +271,10 @@ class DatabaseStore extends MailspringStore {
   _query(query: SQLString, values: SQLValue[] = [], background = false) {
     // eslint-disable-next-line no-async-promise-executor
     return new Promise<{ [key: string]: any }[]>(async (resolve, reject) => {
+      if (this._openFailure) {
+        reject(this._openFailure);
+        return;
+      }
       if (!this._open) {
         this._waiting.push(() => this._query(query, values).then(resolve, reject));
         return;
@@ -361,6 +411,14 @@ class DatabaseStore extends MailspringStore {
   _agentOpenQueries: { [id: string]: (args: AgentResponse) => void };
 
   _executeInBackground(query: SQLString, values: SQLValue[]) {
+    if (databaseEncryptionRequested()) {
+      // 原版 database-agent.js 使用普通 SQLite，会绕过当前连接的 key。
+      // 开发验证阶段只能在已经通过 SQLCipher 校验的同进程连接上查询。
+      return this._executeLocally(query, values).then(
+        (results) => ({ results, agentTime: -1 }),
+        () => ({ results: [], agentTime: -1, error: 'Encrypted query failed' })
+      );
+    }
     if (!this._agent && !this._agentSpawnFailed) {
       this._agentOpenQueries = {};
       try {
