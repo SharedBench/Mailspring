@@ -1,4 +1,5 @@
 # Mailspring：全数据加密、传输加密及 Chumen 托管授权（macOS）
+> **V3 范围更新（2026-11-08）**：用户明确收缩为“先把核心 `edgehill.db` 做 SQLCipher 加密 + MCP 每客户端独立授权，默认谁都不能读”。原本此文要求 APFS 加密空间、所有附件/缓存/通信同步完成，现降为长期规划；**请优先执行 [V3 核心数据库与 MCP 最小版](core-database-and-mcp-authorization-mvp-20261108.zh.md)**。当前仅 MCP 独立授权代码提交，SQLCipher 双端未实现；其阻塞跟踪 [Chumen Issue #66](https://github.com/buildHelpers/Chumen/issues/66)，禁止把此文当成已完成全加密。
 
 **状态：DESIGN / SOURCE_REVIEW；尚未修改产品源码，NOT_RUN。2026-11-08。**
 
