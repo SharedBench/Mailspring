@@ -51,3 +51,28 @@ npm test -- --spec-file-pattern='mcp-(client-authorization|http-server|stdio-bri
 3. **旧桥不兼容**：为阻断旧共享令牌，历史 stdio 自动接入被有意停止；需另行实现按客户端秘密存储的安全 stdio 配对，不能回退共享 token。
 4. **性能和互操作性**：尚未跑完整 NPM 构建，MCP SDK 事件上下文及撤权中异步请求的跨进程边界必须在真实 Mac 测试中验证；验收前保持 PR Draft，不部署/合主。
 5. **资料暴露**：本地 MCP HTTP 仍是未加密回环通道；只有高熵凭据和会话隔离，不宣称链路加密或 OS 沙箱。
+
+## 2026-11-08 剩余问题补修范围
+
+用户要求“都处理下吧”，本轮在独立分支补充 HTTP 输入及生命周期安全修复：所有 POST 正文最多 1 MiB，收取正文最多 10 秒；中断／超限立即结束，不保存邮件或凭据；严格限制回环 Host 与请求路径；使用 Map 保存随机会话，最多 32 个；停用服务先停止接入并关闭本实例拥有的 socket，阻止旧请求在关闭后恢复会话。期限和范围变更使既有会话失效。只在独立回环端口执行传输测试，邮件工具替身与真实业务严格区分，SQLCipher 不因此视作已实现。依据 [Node HTTP 生命周期](https://nodejs.org/api/http.html#servercloseallconnections)；支持既有 Node 16，使用本实例连接集合，不要求新版本专属 API。
+
+```mermaid
+flowchart TD
+ A[回环请求] --> B[Host／路径及客户端检查]
+ B --> C{有效会话或可创建会话}
+ C -->|否| D[拒绝]
+ C -->|是| E[有界读取 POST 正文]
+ E -->|超限／超时／断开| D
+ E --> F[复核授权及服务仍有效]
+ F --> G[只在当前客户端上下文处理]
+ H[停用服务／撤权] --> I[关闭本实例连接和会话]
+ I --> D
+```
+
+### 本轮实际验证
+
+- **REAL**：TypeScript 5.7.3 严格检查 HTTP 与授权模块通过；真实 SDK 1.29.0、本机随机回环端口共 11 项回归通过，退出 0。覆盖无效旧凭据、畸形 Host／绝对请求地址、初始化、跨客户端会话、初始化及既有会话 1 MiB 限制、原型字段、期限／邮箱范围变化、正文中途撤权、异步上下文隔离、32 会话上限、固定 10 秒慢正文、连接中断及停服回收。
+- **MOCK 边界**：独立 runner 的 `mcp-tools.ts` 是空替身；邮箱、数据库、Electron 页面及 Chumen 原生身份均未调用。严格检查只覆盖两个真实生产模块与替身签名，不代表全 App TypeScript 或 Electron 构建。
+- runner：`scripts/test-mcp-http-security.cjs`；显式指定 `CHUMEN_MCP_TEST_RUNTIME`（固定依赖目录）、`CHUMEN_MCP_TEST_OUTPUT`（任务临时目录）。依赖安装关闭 scripts，未安装或启动用户 Mailspring。
+- 初次隔离测试因 SDK 模块解析方式及已有可空 transport 类型检查失败，已修正解析与生产闭包的确定 transport 后通过；不把失败改成通过。
+- **BLOCKED**：核心数据库 SQLCipher 双端尚未完成，不能启用加密、迁移真实邮箱或称 issue #66 已解决。保持原 PR Draft。
