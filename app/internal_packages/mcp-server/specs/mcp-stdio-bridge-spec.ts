@@ -2,10 +2,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ChildProcess, spawn } from 'child_process';
-import { McpHttpServer } from '../lib/mcp-http-server';
 
 const PORT = 21985;
-const TOKEN = 'spec-bridge-token';
+const TOKEN = 'insecure-shared-bearer-no-longer-accepted';
 const BRIDGE = path.join(__dirname, '..', 'lib', 'mcp-stdio-bridge.js');
 
 interface JsonRpcMessage {
@@ -14,8 +13,7 @@ interface JsonRpcMessage {
   error?: { code: number; message: string };
 }
 
-// Drives the bridge the way Claude Desktop does: newline-delimited JSON-RPC
-// over the child's stdin/stdout, run under Electron-as-Node.
+// 旧 stdio 桥仅保留拒绝路径；不应再以共享令牌注册新的 MCP 客户端。
 class BridgeClient {
   child: ChildProcess;
   received: JsonRpcMessage[] = [];
@@ -69,9 +67,7 @@ class BridgeClient {
         clientInfo: { name: 'bridge-spec', version: '0.0.1' },
       },
     });
-    const init = await this.response(1);
-    this.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-    return init;
+    return this.response(1);
   }
 
   close(): Promise<void> {
@@ -109,79 +105,34 @@ describe('mcp-stdio-bridge parseEventStream', function () {
   });
 });
 
-describe('mcp-stdio-bridge', function () {
+describe('mcp-stdio-bridge legacy refusal', function () {
   beforeEach(function () {
     this.configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mailspring-bridge-spec-'));
     fs.writeFileSync(
       path.join(this.configDir, 'config.json'),
       JSON.stringify({ '*': { core: { mcp: { enabled: true, port: PORT, token: TOKEN } } } })
     );
-    this.server = new McpHttpServer();
-    waitsForPromise(() => this.server.start(PORT, () => TOKEN));
   });
 
   afterEach(function () {
-    waitsForPromise(() => this.server.stop());
     fs.rmSync(this.configDir, { recursive: true, force: true });
   });
 
-  it('proxies initialize and tool calls over stdio', function () {
+  it('refuses legacy shared bearer without contacting the mail server', function () {
     waitsForPromise(async () => {
       const client = new BridgeClient(this.configDir);
       try {
         const init = await client.initialize();
-        expect(init.result.serverInfo.name).toBe('mailspring');
-
-        client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-        const { result } = await client.response(2);
-        expect(result.tools.map((t) => t.name)).toContain('get_attachment');
+        expect(init.error).toBeDefined();
+        expect(init.error!.message).toContain('旧 Mailspring stdio 桥');
+        expect(client.child.exitCode).toBeNull();
       } finally {
         await client.close();
       }
     });
   });
 
-  it('re-initializes transparently after the server restarts', function () {
-    waitsForPromise(async () => {
-      const client = new BridgeClient(this.configDir);
-      try {
-        await client.initialize();
-        client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-        expect((await client.response(2)).result).toBeDefined();
-
-        // A fresh server has no record of the bridge's session.
-        await this.server.stop();
-        this.server = new McpHttpServer();
-        await this.server.start(PORT, () => TOKEN);
-
-        client.send({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
-        const after = await client.response(3);
-        expect(after.error).toBeUndefined();
-        expect(after.result.tools.length).toBeGreaterThan(0);
-        expect(client.stderr).toContain('re-initializing');
-      } finally {
-        await client.close();
-      }
-    });
-  });
-
-  it('answers requests with a JSON-RPC error while Mailspring is not listening', function () {
-    waitsForPromise(async () => {
-      const client = new BridgeClient(this.configDir);
-      try {
-        await client.initialize();
-        await this.server.stop();
-
-        client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-        const { error } = await client.response(2);
-        expect(error.message).toContain('Mailspring is not running');
-      } finally {
-        await client.close();
-      }
-    });
-  });
-
-  it('fails fast with a clear error when the MCP server is disabled in config', function () {
+  it('fails clearly when MCP is disabled', function () {
     waitsForPromise(async () => {
       fs.writeFileSync(
         path.join(this.configDir, 'config.json'),
@@ -190,42 +141,20 @@ describe('mcp-stdio-bridge', function () {
       const client = new BridgeClient(this.configDir);
       try {
         const init = await client.initialize();
-        expect(init.error.message).toContain('turned off');
+        expect(init.error!.message).toContain('turned off');
       } finally {
         await client.close();
       }
     });
   });
 
-  it('rejects batch requests and ignores non-object lines without exiting', function () {
+  it('keeps handling calls as errors rather than resurrecting revoked authority', function () {
     waitsForPromise(async () => {
       const client = new BridgeClient(this.configDir);
       try {
-        await client.initialize();
-        client.child.stdin.write('null\n5\n"text"\n');
-        client.send([{ jsonrpc: '2.0', id: 2, method: 'tools/list' }]);
-        client.send({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
-        expect((await client.response(3)).result).toBeDefined();
-        const batchError = client.received.find((m) => m.id === null);
-        expect(batchError.error.code).toBe(-32600);
-        expect(client.child.exitCode).toBeNull();
-      } finally {
-        await client.close();
-      }
-    });
-  });
-
-  it('rejects the wrong token from a stale config without crashing', function () {
-    waitsForPromise(async () => {
-      fs.writeFileSync(
-        path.join(this.configDir, 'config.json'),
-        JSON.stringify({ '*': { core: { mcp: { port: PORT, token: 'wrong' } } } })
-      );
-      const client = new BridgeClient(this.configDir);
-      try {
-        const init = await client.initialize();
-        expect(init.error).toBeDefined();
-        expect(client.child.exitCode).toBeNull();
+        expect((await client.initialize()).error).toBeDefined();
+        client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+        expect((await client.response(2)).error).toBeDefined();
       } finally {
         await client.close();
       }
