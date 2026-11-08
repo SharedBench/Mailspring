@@ -7,6 +7,7 @@ import {
   isThreadAllowed as grantIsThreadAllowed,
   isMessageAllowed as grantIsMessageAllowed,
 } from '../../../src/services/mail-access/grant';
+import { currentMcpClient } from './mcp-client-authorization';
 
 type AccessLevel = 'read-only' | 'read-write' | 'read-write-send';
 
@@ -26,13 +27,13 @@ function getMcpConfig(): {
 }
 
 export function checkAccessLevel(category: 'read' | 'write' | 'send'): string | null {
-  const { accessLevel } = getMcpConfig();
-  if (category === 'read') return null;
-  if (category === 'write' && (accessLevel === 'read-write' || accessLevel === 'read-write-send')) {
-    return null;
+  const client = currentMcpClient();
+  if (!client) return 'Access denied: no active approved MCP client';
+  // 最小版本只有单独的人审只读 grant；旧全局 read-write-send 设置无法扩权。
+  if (category !== 'read' || client.accessLevel !== 'read-only') {
+    return 'Access denied: the current MCP client is approved for read-only access';
   }
-  if (category === 'send' && accessLevel === 'read-write-send') return null;
-  return `Access denied: '${category}' operations require access level '${category === 'send' ? 'read-write-send' : 'read-write'}', but current level is '${accessLevel}'.`;
+  return mcpGrant().accountIds?.length ? null : 'Access denied: no approved mail accounts';
 }
 
 // ── Pure predicates ──────────────────────────────────────────────────────
@@ -41,18 +42,19 @@ export function checkAccessLevel(category: 'read' | 'write' | 'send'): string | 
 // and the serializers in mcp-serializers.ts are built on it.
 
 export function mcpGrant(): Grant {
+  const client = currentMcpClient();
+  if (!client) return { accountIds: [], excludedFolderIds: {} };
   const { enabledAccounts } = getMcpConfig();
-  const configured = Object.keys(enabledAccounts);
+  const approvedAccounts = new Set(client.accountIds);
+  const accountIds = Object.keys(enabledAccounts).filter(
+    (id) => !!enabledAccounts[id]?.enabled && approvedAccounts.has(id)
+  );
   const excludedFolderIds: Grant['excludedFolderIds'] = {};
-  for (const accountId of configured) {
+  for (const accountId of accountIds) {
     excludedFolderIds[accountId] = enabledAccounts[accountId]?.excludedFolderIds || [];
   }
-  return {
-    // If no account configuration exists, all accounts are enabled by default.
-    accountIds:
-      configured.length === 0 ? null : configured.filter((id) => !!enabledAccounts[id]?.enabled),
-    excludedFolderIds,
-  };
+  // 无客户端或无显式账号选择时必定为空，不再将 null 解释为全部账户。
+  return { accountIds, excludedFolderIds };
 }
 
 export function isAccountAllowed(accountId: string): boolean {
