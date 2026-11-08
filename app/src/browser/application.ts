@@ -120,7 +120,7 @@ export default class Application extends EventEmitter {
       try {
         const header = Buffer.alloc(16);
         const count = fs.readSync(fd, header, 0, 16, 0);
-        return count !== 16 || !header.equals(Buffer.from('SQLite format 3\\0'));
+        return count !== 16 || !header.equals(Buffer.from('SQLite format 3\0'));
       } finally {
         fs.closeSync(fd);
       }
