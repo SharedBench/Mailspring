@@ -1,5 +1,6 @@
 import * as http from 'http';
-import { randomUUID, createHash, timingSafeEqual } from 'crypto';
+import { randomUUID } from 'crypto';
+import { McpClientGrant, withMcpClient } from './mcp-client-authorization';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -7,7 +8,7 @@ import { registerTools, registerResources } from './mcp-tools';
 
 export class McpHttpServer {
   private httpServer: http.Server | null = null;
-  private transports: Record<string, StreamableHTTPServerTransport> = {};
+  private transports: Record<string, { transport: StreamableHTTPServerTransport; clientId: string; tokenHash: string }> = {};
 
   private _createServer(): McpServer {
     const server = new McpServer({
@@ -19,7 +20,7 @@ export class McpHttpServer {
     return server;
   }
 
-  async start(port: number, getToken: () => string): Promise<void> {
+  async start(port: number, authorize: (token: string) => McpClientGrant | null): Promise<void> {
     if (this.httpServer) await this.stop();
 
     this.httpServer = http.createServer(async (req, res) => {
@@ -31,21 +32,28 @@ export class McpHttpServer {
         return;
       }
 
-      const token = getToken();
-
-      // Validate bearer token using a timing-safe comparison. We compare
-      // fixed-length SHA-256 digests rather than the raw strings so that
-      // (a) timingSafeEqual never throws due to mismatched buffer lengths,
-      // and (b) the comparison time doesn't leak the token's length.
-      const authHeader = req.headers['authorization'] || '';
-      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-      const bearerTokenHash = createHash('sha256').update(bearerToken).digest();
-      const expectedTokenHash = createHash('sha256').update(token).digest();
-      if (!timingSafeEqual(bearerTokenHash, expectedTokenHash)) {
+      // 客户端独立强凭据；共享的 core.mcp.token 不再有任何权限。
+      const authorization = req.headers['authorization'];
+      const rawHeader = typeof authorization === 'string' ? authorization : '';
+      const match = /^Bearer (mscp_[0-9a-f]{64})$/.exec(rawHeader);
+      const bearer = match ? match[1] : '';
+      const client = bearer ? authorize(bearer) : null;
+      if (!client) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        res.end(JSON.stringify({ error: 'Unauthorized client' }));
         return;
       }
+      // 变更凭据、范围、期限或禁用状态时，原 HTTP 会话不能继承旧授权。
+      const stillAuthorized = () => {
+        const current = authorize(bearer);
+        return (
+          !!current &&
+          current.id === client.id &&
+          current.tokenHash === client.tokenHash &&
+          current.accessLevel === client.accessLevel &&
+          JSON.stringify(current.accountIds) === JSON.stringify(client.accountIds)
+        );
+      };
 
       // Safety timeout: if the response hasn't been sent after 2 minutes, end it
       // to prevent hanging connections from blocking the server.
@@ -63,7 +71,13 @@ export class McpHttpServer {
         let transport: StreamableHTTPServerTransport | undefined;
 
         if (sessionId && this.transports[sessionId]) {
-          transport = this.transports[sessionId];
+          const session = this.transports[sessionId];
+          if (session.clientId !== client.id || session.tokenHash !== client.tokenHash) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Session belongs to another client' }));
+            return;
+          }
+          transport = session.transport;
         } else if (req.method === 'POST') {
           // Parse body to check if this is an initialize request
           const body = await new Promise<string>((resolve) => {
@@ -102,7 +116,7 @@ export class McpHttpServer {
               enableDnsRebindingProtection: true,
               allowedHosts: [`127.0.0.1:${port}`, `localhost:${port}`],
               onsessioninitialized: (sid: string) => {
-                this.transports[sid] = newTransport;
+                this.transports[sid] = { transport: newTransport, clientId: client.id, tokenHash: client.tokenHash };
               },
             });
             newTransport.onclose = () => {
@@ -112,8 +126,11 @@ export class McpHttpServer {
             transport = newTransport;
 
             const server = this._createServer();
-            await server.connect(transport);
-            await transport.handleRequest(req, res, parsed);
+            await withMcpClient(client, stillAuthorized, async () => {
+              await server.connect(transport);
+              if (!stillAuthorized()) throw new Error('MCP client authorization was revoked');
+              await transport.handleRequest(req, res, parsed);
+            });
             return;
           } else if (!sessionId) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -140,7 +157,7 @@ export class McpHttpServer {
           return;
         }
 
-        await transport.handleRequest(req, res);
+        await withMcpClient(client, stillAuthorized, () => transport.handleRequest(req, res));
       } catch (err) {
         console.error('[MCP Server] Error handling request:', err);
         if (!res.headersSent) {
@@ -163,15 +180,20 @@ export class McpHttpServer {
     });
   }
 
-  async stop(): Promise<void> {
-    for (const sid of Object.keys(this.transports)) {
+  async invalidateSessions(): Promise<void> {
+    const sessions = Object.values(this.transports);
+    this.transports = {};
+    for (const session of sessions) {
       try {
-        await this.transports[sid].close();
+        await session.transport.close();
       } catch {
-        // ignore
+        // 已撤销的会话不能恢复授权。
       }
     }
-    this.transports = {};
+  }
+
+  async stop(): Promise<void> {
+    await this.invalidateSessions();
 
     if (this.httpServer) {
       return new Promise<void>((resolve) => {
