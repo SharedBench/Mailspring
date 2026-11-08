@@ -104,11 +104,26 @@ export default class Application extends EventEmitter {
   private _preserveDatabaseAgainstReset(): boolean {
     const db = path.join(this.configDirPath, 'edgehill.db');
     const config = path.join(this.configDirPath, 'config.json');
+    const wal = db + '-wal';
+    const shm = db + '-shm';
     try {
-      if (!fs.existsSync(config)) return fs.existsSync(db);
+      const hasDatabaseFiles = [db, wal, shm].some((name) => fs.existsSync(name));
+      if (!fs.existsSync(config)) return hasDatabaseFiles;
       const data = JSON.parse(fs.readFileSync(config, 'utf8'));
       if (!data || !data['*']) return true;
-      return data['*'].core?.databaseSecurity?.enabled === true;
+      if (data['*'].core?.databaseSecurity?.enabled === true) return true;
+      // 即使用户配置丢失/被意外重置，只要库不是可确认的普通 SQLite，
+      // 就绝不把“无法打开加密库”解释为“可以删除缓存”。
+      if (!hasDatabaseFiles) return false;
+      if (!fs.existsSync(db)) return true;
+      const fd = fs.openSync(db, 'r');
+      try {
+        const header = Buffer.alloc(16);
+        const count = fs.readSync(fd, header, 0, 16, 0);
+        return count !== 16 || !header.equals(Buffer.from('SQLite format 3\\0'));
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch {
       return true;
     }
